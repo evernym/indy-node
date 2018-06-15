@@ -10,6 +10,7 @@ from indy.ledger import build_attrib_request
 from indy_common.config_helper import NodeConfigHelper
 from plenum.common.constants import REQACK, TXN_ID, DATA
 from plenum.test.pool_transactions.helper import sdk_sign_and_send_prepared_request, sdk_add_new_nym
+from plenum.common.txn_util import get_type, get_txn_id
 from stp_core.common.log import getlogger
 from plenum.common.signer_simple import SimpleSigner
 from plenum.common.util import getMaxFailures, runall, randomString
@@ -45,23 +46,6 @@ class Organization:
         else:
             raise ValueError("No wallet exists for this user id")
 
-    def addTxnsForCompletedRequestsInWallet(self, reqs: Iterable, wallet:
-    Wallet):
-        for req in reqs:
-            reply, status = self.client.getReply(req.reqId)
-            if status == "CONFIRMED":
-                # TODO Figure out the actual implementation of
-                # TODO     `buildCompletedTxnFromReply`. This is just a stub
-                # TODO     implementation
-                txn = buildCompletedTxnFromReply(req, reply)
-                # TODO Move this logic in wallet
-                if txn['txnType'] == ATTRIB and txn['data'] is not None:
-                    attr = list(txn['data'].keys())[0]
-                    if attr in wallet.attributeEncKeys:
-                        key = wallet.attributeEncKeys.pop(attr)
-                        txn['secretKey'] = key
-                wallet.addCompletedTxn(txn)
-
 
 @spyable(methods=[Upgrader.processLedger])
 class TestUpgrader(Upgrader):
@@ -80,6 +64,10 @@ class TestUpgrader(Upgrader):
              Node.onBatchCreated, Node.onBatchRejected])
 class TestNode(TempStorage, TestNodeCore, Node):
     def __init__(self, *args, **kwargs):
+        from plenum.common.stacks import nodeStackClass, clientStackClass
+        self.NodeStackClass = nodeStackClass
+        self.ClientStackClass = clientStackClass
+
         Node.__init__(self, *args, **kwargs)
         TestNodeCore.__init__(self, *args, **kwargs)
         self.cleanupOnStopping = True
@@ -106,6 +94,14 @@ class TestNode(TempStorage, TestNodeCore, Node):
     def dump_additional_info(self):
         pass
 
+    @property
+    def nodeStackClass(self):
+        return self.NodeStackClass
+
+    @property
+    def clientStackClass(self):
+        return self.ClientStackClass
+
 
 def checkSubmitted(looper, client, optype, txnsBefore):
     txnsAfter = []
@@ -119,8 +115,8 @@ def checkSubmitted(looper, client, optype, txnsBefore):
     timeout = plenumWaits.expectedReqAckQuorumTime()
     looper.run(eventually(checkTxnCountAdvanced, retryWait=1,
                           timeout=timeout))
-    txnIdsBefore = [txn[TXN_ID] for txn in txnsBefore]
-    txnIdsAfter = [txn[TXN_ID] for txn in txnsAfter]
+    txnIdsBefore = [get_txn_id(txn) for txn in txnsBefore]
+    txnIdsAfter = [get_txn_id(txn) for txn in txnsAfter]
     logger.debug("old and new txnids {} {}".format(txnIdsBefore, txnIdsAfter))
     return list(set(txnIdsAfter) - set(txnIdsBefore))
 
@@ -206,7 +202,7 @@ def checkGetAttr(reqKey, trustAnchor, attrName, attrValue):
     assert reply
     data = json.loads(reply.get(DATA))
     assert status == "CONFIRMED" and \
-           (data is not None and data.get(attrName) == attrValue)
+        (data is not None and data.get(attrName) == attrValue)
     return reply
 
 
@@ -226,9 +222,9 @@ def getAttribute(
         attrib, sender=trustAnchorWallet.defaultId)
     trustAnchor.submitReqs(req)
     timeout = waits.expectedTransactionExecutionTime(len(trustAnchor.nodeReg))
-    return looper.run(eventually(checkGetAttr, req.key, trustAnchor,
-                                 attributeName, attributeValue, retryWait=1,
-                                 timeout=timeout))
+    return looper.run(eventually(checkGetAttr, (req.identifier, req.reqId),
+                                 trustAnchor, attributeName, attributeValue,
+                                 retryWait=1, timeout=timeout))
 
 
 def sdk_get_attribute():
